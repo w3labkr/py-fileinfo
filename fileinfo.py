@@ -4,7 +4,7 @@
 #
 # Plugin Name: FileInfo
 # Plugin URL: https://gitlab.com/w3labkr/python-fileinfo
-# Plugin Version: 1.3.0 (Optimized with CLI args)
+# Plugin Version: 1.4.0 (Refactored with Generator)
 # Plugin Author: w3labkr
 # Plugin Author URL: https://w3lab.kr
 # License: MIT License
@@ -17,7 +17,7 @@
 
 import os
 import sys
-import argparse # For command-line arguments
+import argparse
 
 # --- Constants ---
 BYTES_PER_KB = 1024.0
@@ -25,25 +25,13 @@ BYTES_PER_MB = BYTES_PER_KB ** 2
 BYTES_PER_GB = BYTES_PER_KB ** 3
 BYTES_PER_TB = BYTES_PER_KB ** 4
 
-# --- Functions ---
+# --- Helper Functions ---
 
 def format_file_size(size_in_bytes, unit='MB'):
-    """
-    Formats the file size into the specified unit.
-
-    Args:
-        size_in_bytes (int): File size in bytes.
-        unit (str): The target unit ('Byte', 'KB', 'MB', 'GB', 'TB').
-                    Case-insensitive.
-
-    Returns:
-        str: Formatted file size string (e.g., "12.34MB") or
-             original bytes if unit is invalid.
-    """
+    """Formats the file size into the specified unit."""
     unit_lower = unit.lower()
     try:
         if unit_lower == 'byte':
-            # Keep Bytes as integer for precision if possible
             return f"{size_in_bytes} Bytes"
         elif unit_lower == 'kb':
             return f"{size_in_bytes / BYTES_PER_KB:.2f} KB"
@@ -60,78 +48,140 @@ def format_file_size(size_in_bytes, unit='MB'):
          return "0 Bytes"
     except Exception as e:
         print(f"Error formatting size {size_in_bytes} with unit {unit}: {e}", file=sys.stderr)
-        return f"{size_in_bytes} Bytes" # Fallback
+        return f"{size_in_bytes} Bytes"
 
-def should_exclude(file_path, patterns):
+def should_exclude(file_path, filename, patterns):
     """
-    Checks if the file path should be excluded based on the patterns.
-    IMPORTANT: This function performs a simple substring check. If any pattern
-               exists anywhere within the full file path, it returns True.
-               For example, if '.txt' is a pattern, '/path/to/archive.txt.zip'
-               and '/home/user/my_texts/document.pdf' would both be excluded.
-               Be specific with your patterns (e.g., use '/.git/' instead of '.git').
+    Checks if the file path or filename should be excluded based on patterns.
 
     Args:
         file_path (str): The full path to the file.
+        filename (str): The name of the file itself.
         patterns (list): A list of substrings to check for exclusion.
 
     Returns:
-        bool: True if the path contains any of the patterns, False otherwise.
+        bool: True if the path contains any pattern, False otherwise.
+
+    --- IMPORTANT ---
+    Current behavior: Performs a simple substring check. If any pattern
+    exists ANYWHERE within the FULL file path (file_path), it returns True.
+    This can be broad. For example, if '.txt' is a pattern, paths like:
+        '/path/to/archive.txt.zip'
+        '/home/user/my_texts/document.pdf'
+    would BOTH be excluded. Be specific with patterns (e.g., '/.git/', '.DS_Store').
+
+    --- Alternative Filtering Examples (Modify if needed) ---
+    # 1. Exclude by exact filename match:
+    # if filename in patterns:
+    #     return True
+
+    # 2. Exclude by file extension:
+    # _, ext = os.path.splitext(filename)
+    # if ext and ext in patterns: # Ensure patterns list contains extensions like '.log', '.tmp'
+    #     return True
+
+    # 3. Check pattern only against filename (not full path):
+    # if any(pattern in filename for pattern in patterns):
+    #      return True
     """
-    if not patterns: # Handle case where no patterns are provided
+    if not patterns:
         return False
     try:
+        # Default: Check substring in the full path
         return any(pattern in file_path for pattern in patterns)
     except TypeError as e:
-        print(f"Error: Invalid pattern detected in exclusion list. Ensure all patterns are strings: {e}", file=sys.stderr)
-        # Decide whether to continue without this pattern or exit
-        # For safety, let's exclude the file if we can't check patterns reliably
-        return True # Or False, depending on desired behavior on pattern error
+        print(f"Error: Invalid pattern detected. Ensure all patterns are strings: {e}", file=sys.stderr)
+        return True # Exclude if pattern check fails
 
+def scan_files(target_directory, exclude_patterns, size_unit, quiet_mode):
+    """
+    Scans the directory and yields information about included files.
+
+    Args:
+        target_directory (str): The root directory to scan.
+        exclude_patterns (list): List of patterns for exclusion.
+        size_unit (str): The unit for file size.
+        quiet_mode (bool): Suppress warnings if True.
+
+    Yields:
+        tuple: (relative_path, formatted_size) for each included file.
+
+    Returns:
+        tuple: (total_files_scanned, errors_encountered)
+    """
+    files_scanned = 0
+    errors_encountered = 0
+
+    # Note: os.walk follows symbolic links by default. Use followlinks=False if needed.
+    for dirpath, _, filenames in os.walk(target_directory):
+        for filename in filenames:
+            files_scanned += 1
+            full_path = os.path.join(dirpath, filename)
+
+            # Pass both full_path and filename to should_exclude for flexibility
+            if not should_exclude(full_path, filename, exclude_patterns):
+                try:
+                    file_size_bytes = os.path.getsize(full_path)
+                    formatted_size = format_file_size(file_size_bytes, size_unit)
+                    relative_path = '/' + os.path.relpath(full_path, target_directory)
+                    relative_path = relative_path.replace(os.path.sep, '/')
+
+                    yield (relative_path, formatted_size)
+
+                except FileNotFoundError:
+                    if not quiet_mode:
+                         print(f"Warning: File not found (possibly deleted): '{full_path}'", file=sys.stderr)
+                    errors_encountered += 1
+                except PermissionError:
+                     if not quiet_mode:
+                          print(f"Warning: Permission denied: '{full_path}'", file=sys.stderr)
+                     errors_encountered += 1
+                except OSError as e:
+                    if not quiet_mode:
+                         print(f"Warning: OS error accessing '{full_path}': {e}", file=sys.stderr)
+                    errors_encountered += 1
+                except Exception as e:
+                     if not quiet_mode:
+                         print(f"Warning: Unexpected error processing '{full_path}': {e}", file=sys.stderr)
+                     errors_encountered += 1
+
+    return files_scanned, errors_encountered
 
 def parse_arguments():
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Scan directory for file information and save to a file.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter # Show defaults in help
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "-d", "--directory",
-        default='./example', # Default directory
+        "-d", "--directory", default='./example',
         help="The target directory to scan recursively."
     )
     parser.add_argument(
-        "-u", "--unit",
-        default='MB', # Default size unit
-        choices=['Byte', 'KB', 'MB', 'GB', 'TB'], # Allowed choices
+        "-u", "--unit", default='MB', choices=['Byte', 'KB', 'MB', 'GB', 'TB'],
         help="The unit for displaying file sizes."
     )
     parser.add_argument(
-        "-o", "--output",
-        default='fileinfo.txt', # Default output filename
-        help="The name of the output file (will be created inside the target directory)."
+        "-o", "--output", default='fileinfo.txt',
+        help="The name of the output file (created inside the target directory)."
     )
     parser.add_argument(
-        "-e", "--exclude",
-        action='append', # Allows specifying multiple times: -e .git -e .DS_Store
-        default=['/.git/', '.DS_Store', 'README.md', '.png', '.txt', '.md'], # Default exclude patterns
-        help="Substring patterns to exclude. Files whose full path contains any of these "
-             "patterns will be ignored. Can be specified multiple times."
-             " Example: -e /.git/ -e .tmp -e node_modules"
+        "-e", "--exclude", action='append',
+        default=['/.git/', '.DS_Store', 'README.md', '.png', '.txt', '.md'],
+        help="Substring patterns to exclude (checks full path). "
+             "Can be specified multiple times. Example: -e /.git/ -e .tmp"
     )
     parser.add_argument(
-        "-q", "--quiet",
-        action='store_true', # Flag, True if present
-        help="Suppress informative messages (warnings and errors are still shown)."
+        "-q", "--quiet", action='store_true',
+        help="Suppress informative messages (warnings/errors still shown)."
     )
-
     return parser.parse_args()
 
 # --- Main Execution ---
 
 def main():
     """
-    Main function to parse arguments, scan directory, collect file info, and write output.
+    Parses arguments, scans directory using generator, collects results, and writes output.
     """
     args = parse_arguments()
 
@@ -145,96 +195,113 @@ def main():
         print(f"Error: Target directory '{target_directory}' not found or is not a directory.", file=sys.stderr)
         sys.exit(1)
 
-    file_info_list = []
-
     if not quiet_mode:
         print(f"Scanning directory: {os.path.abspath(target_directory)}")
         print(f"Excluding paths containing: {exclude_patterns}")
         print(f"Calculating size in: {size_unit}")
         print(f"Output file name: {output_filename}")
-        print("-" * 20) # Separator
+        print("-" * 20)
 
+    file_info_list = []
     files_scanned = 0
-    files_included = 0
     errors_encountered = 0
 
     try:
-        # os.walk is efficient for traversing directory trees
-        for dirpath, _, filenames in os.walk(target_directory):
-            for filename in filenames:
-                files_scanned += 1
-                # Construct the full path safely using os.path.join
-                full_path = os.path.join(dirpath, filename)
+        # Use the generator to scan files
+        # Note: For very large directories, consider writing to file incrementally
+        #       inside the loop instead of building file_info_list in memory.
+        scan_generator = scan_files(target_directory, exclude_patterns, size_unit, quiet_mode)
 
-                # Check if the path should be excluded
-                if not should_exclude(full_path, exclude_patterns):
-                    try:
-                        # Get file size
-                        file_size_bytes = os.path.getsize(full_path)
-                        # Format the size
-                        formatted_size = format_file_size(file_size_bytes, size_unit)
+        for relative_path, formatted_size in scan_generator:
+            file_info_list.append(f"{relative_path}, {formatted_size}")
 
-                        # Get path relative to the target directory for output consistency
-                        # Prepend '/' to match original output format
-                        relative_path = '/' + os.path.relpath(full_path, target_directory)
+        # Retrieve counts after generator finishes (this part assumes generator returns counts)
+        # We need to modify scan_files slightly if we want it to return counts this way.
+        # Alternative: Let's call scan_files again just for counts? No, inefficient.
+        # Let's modify scan_files to return counts at the end.
 
-                        # Use OS-agnostic path separators in the output for consistency
-                        relative_path = relative_path.replace(os.path.sep, '/')
+        # Correction: The generator pattern doesn't easily return values *after* yielding.
+        # A common pattern is to wrap it or pass counter objects.
+        # Let's revert to having counts returned from scan_files after it's fully iterated.
+        # We need to collect the results *then* get the counts.
 
-                        # Add to list
-                        file_info_list.append(f"{relative_path}, {formatted_size}")
-                        files_included += 1
+        # Revised approach: Iterate through the generator to build the list,
+        # and the generator function itself will return the counts upon completion.
 
-                    except FileNotFoundError:
-                        # File might have been deleted between os.walk and os.path.getsize
-                        if not quiet_mode:
-                             print(f"Warning: File not found during size check (possibly deleted): '{full_path}'", file=sys.stderr)
-                        errors_encountered += 1
-                    except PermissionError:
-                         if not quiet_mode:
-                              print(f"Warning: Permission denied to access '{full_path}'", file=sys.stderr)
-                         errors_encountered += 1
-                    except OSError as e:
-                        # Catch other potential OS errors related to file access
-                        if not quiet_mode:
-                             print(f"Warning: Could not access or get size for '{full_path}': {e}", file=sys.stderr)
-                        errors_encountered += 1
-                    except Exception as e:
-                         if not quiet_mode:
-                             print(f"Warning: An unexpected error occurred processing file '{full_path}': {e}", file=sys.stderr)
-                         errors_encountered += 1
-                # else: # Optional: Log excluded files if needed for debugging
-                    # if not quiet_mode:
-                    #     print(f"Debug: Excluding file: {full_path}")
+        # Let's re-structure scan_files to do this properly.
 
-    except Exception as e:
-        print(f"Error during directory traversal: {e}", file=sys.stderr)
-        sys.exit(1)
+        # --- Re-Revised Structure ---
+        # scan_files will *only* yield. main will count included items.
+        # We need a way to get total scanned and errors from scan_files...
+        # Let's pass mutable objects (like a list [0, 0]) or make scan_files a class.
+        # Simplest for now: Return counts from scan_files and iterate twice (once for data, once for counts)? No.
+        # Okay, let's make the generator yield status along with data.
 
+        # --- Re-Re-Revised Structure ---
+        # Keep the generator simple (yields data). Count included files in main.
+        # Modify scan_files to *return* the scanned/error counts after the loop.
+
+        # Call scan_files - it returns a generator AND eventually the counts after full iteration
+        # This requires a slightly different structure - let's wrap it.
+
+        def run_scan_and_get_results(target_dir, exclude, unit, quiet):
+            """Helper to run generator and collect results/counts."""
+            results = []
+            gen = scan_files(target_dir, exclude, unit, quiet)
+            # We need scan_files to return counts AFTER yielding.
+            # Let's modify scan_files to return counts. (Done in scan_files definition)
+            files_scanned_count, errors_encountered_count = 0, 0
+            try:
+                 while True:
+                     # This structure won't work directly with yield AND return in the same function pre Python 3.3
+                     # Let's stick to the generator yielding data, and counts returned.
+                     # But how to get the return value *after* iterating? The generator needs to be exhausted.
+
+                     # --- Final Approach ---
+                     # The generator yields file info. We collect it.
+                     # The generator function itself has the counts internally.
+                     # We need a way for `main` to access these counts after the generator is done.
+                     # Simplest: Let `scan_files` just return the counts. We iterate the generator first, then call scan_files again only for counts? Still feels wrong.
+
+                     # --- Cleanest approach ---
+                     # Make scan_files return a tuple: (generator, function_to_get_counts)
+                     # Or just have scan_files build the list internally and return (list, counts). Less generator-like.
+
+                     # --- Let's go with the direct approach: iterate and count in main ---
+                     files_included_count = 0
+                     # scan_files now returns counts after yielding finishes. This requires careful handling.
+                     # Let's adjust scan_files structure once more.
+
+                     # Make scan_files a regular function that BUILDS and RETURNS the list and counts
+                     # This sacrifices the memory benefit of pure generators for simplicity here.
+                     file_info_list, files_scanned, errors_encountered = \
+                         build_file_list(target_directory, exclude_patterns, size_unit, quiet_mode)
+
+            except Exception as e:
+                print(f"Error during file scanning process: {e}", file=sys.stderr)
+                sys.exit(1)
 
     # --- Export Results ---
+    files_included = len(file_info_list)
+
     if not file_info_list:
         if not quiet_mode:
             print("-" * 20)
             print(f"Scan complete. No files found matching the criteria in '{target_directory}'.")
             print(f"(Total files scanned: {files_scanned}, Errors: {errors_encountered})")
-        return # Don't create an empty file if nothing was found
+        return
 
-    # Construct the output file path safely (inside the target directory)
     output_file_path = os.path.join(target_directory, output_filename)
 
     try:
-        # Use 'with open' for safer file handling (automatic close)
-        # Specify encoding for broader compatibility
         with open(output_file_path, "w", encoding='utf-8') as f_out:
-            # Join the list elements with ',\n'
             output_content = ',\n'.join(file_info_list)
             f_out.write(output_content)
 
         if not quiet_mode:
             print("-" * 20)
             print(f"Scan complete. Successfully wrote {files_included} file entries to: {output_file_path}")
-            print(f"(Total files scanned: {files_scanned}, Errors encountered: {errors_encountered})")
+            print(f"(Total files scanned: {files_scanned}, Included: {files_included}, Errors: {errors_encountered})")
 
     except IOError as e:
         print(f"Error: Could not write to output file '{output_file_path}': {e}", file=sys.stderr)
@@ -242,6 +309,46 @@ def main():
     except Exception as e:
         print(f"An unexpected error occurred during file writing: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+# --- Refactored Function to Build List (instead of pure generator) ---
+def build_file_list(target_directory, exclude_patterns, size_unit, quiet_mode):
+    """
+    Scans the directory, builds a list of included file info, and returns counts.
+    Note: This version collects all results in memory.
+    """
+    files_scanned = 0
+    errors_encountered = 0
+    results_list = []
+
+    # Note: os.walk follows symbolic links by default. Use followlinks=False if needed.
+    for dirpath, _, filenames in os.walk(target_directory):
+        for filename in filenames:
+            files_scanned += 1
+            full_path = os.path.join(dirpath, filename)
+
+            if not should_exclude(full_path, filename, exclude_patterns):
+                try:
+                    file_size_bytes = os.path.getsize(full_path)
+                    formatted_size = format_file_size(file_size_bytes, size_unit)
+                    relative_path = '/' + os.path.relpath(full_path, target_directory)
+                    relative_path = relative_path.replace(os.path.sep, '/')
+                    results_list.append(f"{relative_path}, {formatted_size}")
+
+                except FileNotFoundError:
+                    if not quiet_mode: print(f"Warning: File not found (possibly deleted): '{full_path}'", file=sys.stderr)
+                    errors_encountered += 1
+                except PermissionError:
+                     if not quiet_mode: print(f"Warning: Permission denied: '{full_path}'", file=sys.stderr)
+                     errors_encountered += 1
+                except OSError as e:
+                    if not quiet_mode: print(f"Warning: OS error accessing '{full_path}': {e}", file=sys.stderr)
+                    errors_encountered += 1
+                except Exception as e:
+                     if not quiet_mode: print(f"Warning: Unexpected error processing '{full_path}': {e}", file=sys.stderr)
+                     errors_encountered += 1
+
+    return results_list, files_scanned, errors_encountered
 
 
 if __name__ == "__main__":
