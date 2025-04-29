@@ -3,10 +3,10 @@
 
 #
 # Plugin Name: FileInfo
-# Plugin URL: https://gitlab.com/w3labkr/python-fileinfo
-# Plugin Version: 1.4.0 (Refactored with Generator)
+# Plugin URL: https://github.com/w3labkr/py-fileinfo
+# Plugin Version: 1.4.1 (Refactored with Generator)
 # Plugin Author: w3labkr
-# Plugin Author URL: https://w3lab.kr
+# Plugin Author URL: https://w3labkr.github.io/
 # License: MIT License
 #
 # Description: Scans a directory recursively, collects information
@@ -154,7 +154,7 @@ def parse_arguments():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "-d", "--directory", default='./example',
+        "-d", "--directory", default='.',
         help="The target directory to scan recursively."
     )
     parser.add_argument(
@@ -162,12 +162,12 @@ def parse_arguments():
         help="The unit for displaying file sizes."
     )
     parser.add_argument(
-        "-o", "--output", default='fileinfo.txt',
+        "-o", "--output", default='output.txt',
         help="The name of the output file (created inside the target directory)."
     )
     parser.add_argument(
         "-e", "--exclude", action='append',
-        default=['/.git/', '.DS_Store', 'README.md', '.png', '.txt', '.md'],
+        default=['/.git/', '/node_modules/', '/__pycache__/', '.DS_Store', 'Thumbs.db'],
         help="Substring patterns to exclude (checks full path). "
              "Can be specified multiple times. Example: -e /.git/ -e .tmp"
     )
@@ -202,84 +202,19 @@ def main():
         print(f"Output file name: {output_filename}")
         print("-" * 20)
 
+    # Initialize variables
     file_info_list = []
     files_scanned = 0
     errors_encountered = 0
 
     try:
-        # Use the generator to scan files
-        # Note: For very large directories, consider writing to file incrementally
-        #       inside the loop instead of building file_info_list in memory.
-        scan_generator = scan_files(target_directory, exclude_patterns, size_unit, quiet_mode)
+        # Call the function that builds the list and returns counts
+        file_info_list, files_scanned, errors_encountered = \
+            build_file_list(target_directory, exclude_patterns, size_unit, quiet_mode)
 
-        for relative_path, formatted_size in scan_generator:
-            file_info_list.append(f"{relative_path}, {formatted_size}")
-
-        # Retrieve counts after generator finishes (this part assumes generator returns counts)
-        # We need to modify scan_files slightly if we want it to return counts this way.
-        # Alternative: Let's call scan_files again just for counts? No, inefficient.
-        # Let's modify scan_files to return counts at the end.
-
-        # Correction: The generator pattern doesn't easily return values *after* yielding.
-        # A common pattern is to wrap it or pass counter objects.
-        # Let's revert to having counts returned from scan_files after it's fully iterated.
-        # We need to collect the results *then* get the counts.
-
-        # Revised approach: Iterate through the generator to build the list,
-        # and the generator function itself will return the counts upon completion.
-
-        # Let's re-structure scan_files to do this properly.
-
-        # --- Re-Revised Structure ---
-        # scan_files will *only* yield. main will count included items.
-        # We need a way to get total scanned and errors from scan_files...
-        # Let's pass mutable objects (like a list [0, 0]) or make scan_files a class.
-        # Simplest for now: Return counts from scan_files and iterate twice (once for data, once for counts)? No.
-        # Okay, let's make the generator yield status along with data.
-
-        # --- Re-Re-Revised Structure ---
-        # Keep the generator simple (yields data). Count included files in main.
-        # Modify scan_files to *return* the scanned/error counts after the loop.
-
-        # Call scan_files - it returns a generator AND eventually the counts after full iteration
-        # This requires a slightly different structure - let's wrap it.
-
-        def run_scan_and_get_results(target_dir, exclude, unit, quiet):
-            """Helper to run generator and collect results/counts."""
-            results = []
-            gen = scan_files(target_dir, exclude, unit, quiet)
-            # We need scan_files to return counts AFTER yielding.
-            # Let's modify scan_files to return counts. (Done in scan_files definition)
-            files_scanned_count, errors_encountered_count = 0, 0
-            try:
-                 while True:
-                     # This structure won't work directly with yield AND return in the same function pre Python 3.3
-                     # Let's stick to the generator yielding data, and counts returned.
-                     # But how to get the return value *after* iterating? The generator needs to be exhausted.
-
-                     # --- Final Approach ---
-                     # The generator yields file info. We collect it.
-                     # The generator function itself has the counts internally.
-                     # We need a way for `main` to access these counts after the generator is done.
-                     # Simplest: Let `scan_files` just return the counts. We iterate the generator first, then call scan_files again only for counts? Still feels wrong.
-
-                     # --- Cleanest approach ---
-                     # Make scan_files return a tuple: (generator, function_to_get_counts)
-                     # Or just have scan_files build the list internally and return (list, counts). Less generator-like.
-
-                     # --- Let's go with the direct approach: iterate and count in main ---
-                     files_included_count = 0
-                     # scan_files now returns counts after yielding finishes. This requires careful handling.
-                     # Let's adjust scan_files structure once more.
-
-                     # Make scan_files a regular function that BUILDS and RETURNS the list and counts
-                     # This sacrifices the memory benefit of pure generators for simplicity here.
-                     file_info_list, files_scanned, errors_encountered = \
-                         build_file_list(target_directory, exclude_patterns, size_unit, quiet_mode)
-
-            except Exception as e:
-                print(f"Error during file scanning process: {e}", file=sys.stderr)
-                sys.exit(1)
+    except Exception as e:
+        print(f"Error during file scanning process: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # --- Export Results ---
     files_included = len(file_info_list)
@@ -288,15 +223,20 @@ def main():
         if not quiet_mode:
             print("-" * 20)
             print(f"Scan complete. No files found matching the criteria in '{target_directory}'.")
+            # Ensure counts are displayed even if no files are included
             print(f"(Total files scanned: {files_scanned}, Errors: {errors_encountered})")
-        return
+        return # Exit cleanly if no files were included
 
     output_file_path = os.path.join(target_directory, output_filename)
 
     try:
         with open(output_file_path, "w", encoding='utf-8') as f_out:
-            output_content = ',\n'.join(file_info_list)
+            # Join with newline and comma for each entry
+            output_content = '\n'.join(file_info_list)
             f_out.write(output_content)
+            # Add a trailing newline if desired (optional)
+            # f_out.write('\n')
+
 
         if not quiet_mode:
             print("-" * 20)
